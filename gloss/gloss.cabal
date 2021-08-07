@@ -45,6 +45,7 @@ Library
         , gloss-rendering               == 1.13.*
         , GLUT                          == 2.7.*
         , OpenGL                        >= 2.12 && < 3.1
+        , mtl
 
   ghc-options:
         -O2
