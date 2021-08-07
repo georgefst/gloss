@@ -1,7 +1,16 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TupleSections #-}
 
 module Graphics.Gloss.Internals.Interface.Interact
-        (interactWithBackend)
+        (interactWithBackend, MonadGloss)
 where
 import Graphics.Gloss.Data.Color
 import Graphics.Gloss.Data.Controller
@@ -16,30 +25,70 @@ import Graphics.Gloss.Internals.Interface.ViewState.Reshape
 import qualified Graphics.Gloss.Internals.Interface.Callback as Callback
 import Data.IORef
 import System.Mem
+import Control.Monad.IO.Class
+import Control.Monad.State
+import Control.Monad.Reader
+import Control.Monad.Except
+import Data.Bifunctor
 
+-- type M r world err = StateT world (ReaderT r (ExceptT err IO))
+-- example :: forall r world err.
+--         GLUTState
+--         -> Display
+--         -> Color
+--         -> (((((), r), world) -> IO Picture)
+--                   -> (Event -> M r world err ())
+--                   -> (Either err () -> IO ())
+--                   -> (Controller -> IO ())
+--                   -> M r world err ())
+-- example = interactWithBackend @GLUTState @(M r world err)
+
+-- state-y, error-y things
+class MonadIO m => MonadGloss m world err | m -> err, m -> world where
+        runUpdate :: (err -> IO a) -> m a -> world -> IO (world, a)
+        initWorld :: m world
+instance MonadGloss IO () () where
+        runUpdate _h x () = ((),) <$> x
+        initWorld = pure ()
+instance (MonadGloss m world err0) => MonadGloss (ExceptT err m) world (Either err err0) where
+        runUpdate :: (Either err err0 -> IO a) -> ExceptT err m a -> (world -> IO (world, a))
+        runUpdate h x s = runUpdate (h . Right) (runExceptT x >>= either (liftIO . h . Left) pure) s
+        initWorld = lift initWorld
+instance (MonadGloss m world err) => MonadGloss (ReaderT r m) (world, r) err where
+        runUpdate :: (err -> IO a) -> ReaderT r m a -> (world, r) -> IO ((world, r), a)
+        runUpdate h x (s, r) = first (, r) <$> runUpdate h (runReaderT x r) s
+        initWorld = (,) <$> lift initWorld <*> ask
+instance (MonadGloss m world err) => MonadGloss (StateT s m) (world, s) err where
+        runUpdate :: (err -> IO a) -> StateT s m a -> (world, s) -> IO ((world, s), a)
+        runUpdate h x (world0, s) = (\(x',(y,z)) -> ((x',z),y)) <$>
+                runUpdate (fmap (, s) . h) (runStateT x s) world0
+        initWorld = (,) <$> lift initWorld <*> get
 
 interactWithBackend
         :: Backend a
+        => MonadGloss m world err
         => a                            -- ^ Initial state of the backend.
         -> Display                      -- ^ Display config.
         -> Color                        -- ^ Background color.
-        -> world                        -- ^ The initial world.
         -> (world -> IO Picture)        -- ^ A function to produce the current picture.
-        -> (Event -> world -> IO world) -- ^ A function to handle input events.
+        -> (Event -> m ()) -- ^ A function to handle input events.
+        -> (err -> IO ()) -- ^ A function to handle errors.
         -> (Controller -> IO ())        -- ^ Eat the controller
-        -> IO ()
+        -> m ()
 
 interactWithBackend
         backend displayMode background
-        worldStart
         worldToPicture
         worldHandleEvent
+        handleError
         eatController
 
- =  do  viewSR          <- newIORef viewStateInit
-        worldSR         <- newIORef worldStart
-        renderS         <- initState
-        renderSR        <- newIORef renderS
+ =  do
+        worldStart <- initWorld
+        viewSR          <- liftIO $ newIORef viewStateInit
+        worldSR         <- liftIO $ newIORef worldStart
+        renderS         <- liftIO initState
+        renderSR        <- liftIO $ newIORef renderS
 
         let displayFun backendRef = do
                 world      <- readIORef worldSR
@@ -61,18 +110,20 @@ interactWithBackend
                 -- perform GC every frame to try and avoid long pauses
                 performGC
 
+        let worldHandleEvent' = (fmap fst .) . runUpdate handleError . worldHandleEvent
         let callbacks
              =  [ Callback.Display displayFun
 
                 -- Viewport control with mouse
-                , callback_keyMouse worldSR viewSR worldHandleEvent
-                , callback_motion   worldSR worldHandleEvent
-                , callback_reshape  worldSR worldHandleEvent ]
+                , callback_keyMouse worldSR viewSR worldHandleEvent'
+                , callback_motion   worldSR worldHandleEvent'
+                , callback_reshape  worldSR worldHandleEvent' ]
+
 
         -- When we create the window we can pass a function to get a
         -- reference to the backend state. Using this we make a controller
         -- so the client can control the window asynchronously.
-        createWindow backend displayMode background callbacks
+        liftIO $ createWindow backend displayMode background callbacks
          $ \  backendRef
            -> eatController
                 $ Controller
@@ -157,4 +208,3 @@ handle_reshape worldRef eventFn backendRef (width,height)
         writeIORef worldRef world'
         viewState_reshape backendRef (width, height)
         postRedisplay backendRef
-
