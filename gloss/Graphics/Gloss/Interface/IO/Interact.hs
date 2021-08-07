@@ -22,15 +22,20 @@ import Graphics.Gloss.Internals.Interface.Backend
 --   Similar to `displayIO`, except that you manage your own events.
 --
 interactIO
-        :: MonadGloss m world e
-        => Display                      -- ^ Display mode.
+        :: Display                      -- ^ Display mode.
         -> Color                        -- ^ Background color.
+        -> world                        -- ^ Initial world state.
         -> (world -> IO (Picture, String))        -- ^ A function to produce the current picture.
-        -> (Event -> m ()) -- ^ A function to handle input events.
-        -> (e -> IO ())
+        -> (Event -> world -> IO world) -- ^ A function to handle input events.
         -> (Controller -> IO ())        -- ^ Callback to take the display controller.
-        -> m ()
+        -> IO ()
 
-interactIO
+interactIO dis backColor worldInit makePicture handleEvent eatController
  =      interactWithBackend
                 defaultBackendState
+                dis
+                backColor
+                worldInit
+                makePicture
+                handleEvent
+                eatController
